@@ -3,57 +3,49 @@ from nltk.corpus import stopwords
 from nltk.tokenize import word_tokenize
 from nltk.stem.porter import PorterStemmer 
 from gensim import corpora 
-import csv
 import string
-import numpy
+import numpy as np
 import math
+import pandas as pd
+import json
 
 class Filtering:
 
     def __init__(self):
         self.cross_word = None
-        self.SBRs = None 
-        self.NSBRs = None
+        self.SBRmat = None 
+        self.NSBRmat = None
         self.SBR = None 
         self.NSBR = None
         self.dictionary =None
-
-    def readcsv(self,dir,summary_col=-1, description_col=-1,security_col=-1,title=1):
-        csvFile = open(dir, "r") 
-        #读取文件
-        BugReports = csv.reader(csvFile)
-        print(" + [OK] read file!")
-
-        # 读取summary和description
-        text =[] 
-        S_label=[]
-        
-        # 读取描述信息，和安全报告标记
-        for br in BugReports:
-            text.append(br[summary_col] + ' ' + br[description_col])
-            S_label.append(br[security_col])
-        
-        # 处理除了第一行标题以外的文档
-        text = self.treatment(text[title:])
-        S_label = [int(n[0]) for n in S_label[title:]]
-        S_label = numpy.array([S_label]).T    # n行1列标签    
-        print(" + [OK] the file has be Standardized!")
-        return text,S_label
+        self.BR = None
 
     # 文本预处理还需调整
-    def treatment(self,br):
-        # 格式化字符串
+    def treatment(self,dir):
+        #读取文件
+        BR = pd.DataFrame(pd.read_csv(dir,header=0))
+
+        BR = BR[:500]
+        print(" + [OK] read file!")
+
+        # 处理summary和description
+        text = BR['summary'] + BR['description']
+
+        # 词根
         p_stemmer = PorterStemmer() 
         docs = []
         
         # 停词表
         list_stopWords = list(set(stopwords.words('english')))
-        for doc in br:
+
+        # 需要去掉标点符号/回车/数字等
+        remove_map = string.punctuation+string.punctuation +'\n'
+        remove_map = dict((ord(char), " ") for char in remove_map)
+
+        for doc in text:
             # 将所有标点/数字替换成空格以方便分词
-            remove_punctuation_map = dict((ord(char), " ") for char in string.punctuation)
-            remove_number_map = dict((ord(char), " ") for char in string.digits)
-            doc = doc.translate(remove_punctuation_map)
-            doc = doc.translate(remove_number_map)
+            doc = doc.translate(remove_map)
+
             # 待处理文本，先分词
             list_words = word_tokenize(doc)
             # 删除停词,过长和过短的词语,还原词根
@@ -61,73 +53,86 @@ class Filtering:
             filtered_words = [p_stemmer.stem(w) for w in new_list_words if not w in list_stopWords]
             docs.append(filtered_words)
 
-        return docs
+        # 将格式化的数据插回表格
+        BR.insert(1,'text',docs )
+        # 保存
+        BR.drop(['summary','description'],axis=1)
+        self.BRtext = BR
+        BR.to_csv('date.csv',index = False)
 
-    def partition(self, br,label):
-        SBR = []
-        NSBR = []
+        self.SBR  = BR[BR['Security'] == 1]
+        self.NSBR = BR[BR['Security'] == 0]
+        print(" + [OK] the file has be Standardized!")
 
-        for i in range(label.shape[0]):
-            if label[i,0]==1:
-                SBR.append(br[i])
-            else :
-                NSBR.append(br[i])
-        self.SBRs = SBR
-        self.NSBRs =NSBR
         return True
 
-    def findSRW(self, br,label):
+    def readDateFromFile(self,date):
+        BR = pd.DataFrame(pd.read_csv(date,header=0))
+
+        # 保存时,text文本被保存为"['a','b','c']"的字符串格式,重新加载需要解析,此处未完成
+        to_do_this = False
+
+        self.BR = BR
+        self.SBR  = BR[BR['Security'] == 1]
+        self.NSBR = BR[BR['Security'] == 0]
+
+    def findSRW(self):
         # 对应论文3.1 Identifying Security Related Keywords
-        self.partition(br,label)
-        self.dictionary = corpora.Dictionary(self.SBRs)
+        
+        SBR = self.SBR['text']
+        # 提取SBR所有的术语,用词袋模型转化为向量
+        self.dictionary = corpora.Dictionary(SBR)
         # 论文中提到去掉一些低频无用词语，并给了关于这些词语的网址，此处应补充
 
-        SBR = [self.dictionary.doc2bow(doc) for doc in self.SBRs]
-        SBR = self.makematrix(SBR,len(self.dictionary))
+        # 词袋将文本转化为向量,第一步产生的是一个向量队列,(1,2)表示词语1出现2次,一句文本又一组词频表示,需要转化为矩阵
+        SBR = [self.dictionary.doc2bow(doc) for doc in SBR ]
+        SBRmat = self.makematrix(SBR,len(self.dictionary))
 
-        tf_idf = self.tf_idf(SBR)
-        # tf_idf选出前Top100
-        terms = (tf_idf.T).dot( numpy.ones((SBR.shape[0],1))  )
-        terms = numpy.argsort(terms.T)[0,-100:]
+        tf_idf = self.tf_idf(SBRmat)
+
+        '''tf_idf选出前Top100,
+        此处有个疑问:
+        举个例子, 一个词语在多个文档中出现,和一个词语在较少文本中出现,tf-idf矩阵为:
+                t1      t2
+        br1     0.2     0.8
+        br2     0.2     0.05
+        ...     ...     ...
+        brn     0.2     0.1
+        t1在大多数文本中出现, tf-idf分数低, 但是在各个文本都有分布, t2在很少文本中出现, 但能出现比较大的数字
+        最终偏向哪一类型的词语值得考究
+
+        程序运行时发现, 论文中筛选出来的SRW在这个程序中tf-idf反而分数低,可能跟此处的求和有关
+        '''
+        terms = np.sum(tf_idf,axis=0)
+        terms = np.argsort(terms)[-100:]
+
         # 字典保留前100个词语
-
         self.dictionary.filter_tokens(good_ids=terms.tolist())
         self.cross_word = self.dictionary.token2id
-        print("there are the security cross word",self.cross_word)
-
-        # 用已经得到的特征集（安全相关词），讲BR转化成向量
-        SBR = [self.dictionary.doc2bow(doc) for doc in self.SBRs]
-        self.SBR = self.makematrix(SBR,len(self.dictionary))
-        NSBR = [self.dictionary.doc2bow(doc) for doc in self.NSBRs]
-        self.NSBR = self.makematrix(NSBR,len(self.dictionary))
+        print("there are the security related word",self.cross_word)
 
         return True
 
     def farsec(self,support='farsecsq',train='knn'):
-        
-        if 'clni' in support:
-            self.CLNI()
-        if 'sq' in support:
-            M = self.ScoreKeywords(support = 'sq')
-        elif 'two' in support:
-            M = self.ScoreKeywords(support = 'two')
-        else :
-            M = self.ScoreKeywords(support = '')
+
+        M = self.ScoreKeywords(support = support)
+
         BRscore = self.ScoreBugReports(M)
 
         # 用0.75划分，高于0.75的为噪音NSBR
         BRscore[BRscore<0.75]=0
         BRscore[BRscore>0]=1
-        print(BRscore.shape[0] - numpy.ones((1,BRscore.shape[0])).dot(BRscore)[0,0])
+        print("remain : ",BRscore.shape[0] - BRscore.sum())
 
         to_train_in_this = 1
 
         return True
 
     def tf(self,D):
-        max_w = numpy.zeros((D.shape[0],1))
-        for i in range(D.shape[0]):
-            max_w[i]= max(D[i])
+        # 每行的最大值,结果为n行一列矩阵
+        max_w = np.array([D.max(axis= 1)]).T
+        # 可能存在某些文本不出现关键词,向量全为0,避免0/0改为0/1
+        max_w[max_w==0]=1
         tf = 0.5+(0.5 * D)/max_w 
         ''' tf 格式:
 
@@ -140,12 +145,13 @@ class Filtering:
         return tf
 
     def idf(self,D):
+        # 文件总数N,
         N=D.shape[0]
         D[D>0]=1
-        D[D<1]=N
 
-        t = numpy.zeros((1,D.shape[0])).dot(D)
-        idf = numpy.log(N/D)
+        D = D.sum(axis = 0)
+        idf = np.log(N/D)
+
         ''' idf 格式:
 
         t1   ... tn
@@ -155,8 +161,10 @@ class Filtering:
         return idf
 
     def tf_idf(self,D):
+
         tf = self.tf(D)
         idf = self.idf(D)
+
         tf_idf = tf*idf
         ''' tf-idf 格式:
 
@@ -173,38 +181,44 @@ class Filtering:
 
         # 对应论文W，安全相关词的个数
         W=len(self.dictionary) 
-        dictionary.add_documents(self.SBRs)
-        dictionary.add_documents(self.NSBRs)
+        SBR = self.SBR['text']
+        NSBR = self.NSBR['text']
+        dictionary.add_documents(SBR)
+        dictionary.add_documents(NSBR)
         print('all terms : the security related keywords',len(self.dictionary),':',W)
 
-        # 将SBR和NSBR所有的词语都翻译成矩阵,统计所有词语出现的频率和|S|和|NS|,前一百个为安全相关词语
-        S = [dictionary.doc2bow(doc) for doc in self.SBRs]
+        # 将SBR和NSBR所有的词语都翻译成矩阵,前一百个为安全相关词语,故n行前100列为特征矩阵,保存特征矩阵
+        S = [dictionary.doc2bow(doc) for doc in SBR]
         S = self.makematrix(S,len(dictionary))
-        SBR = S[:,:W]
+        SBR =  S[:,:W]
+        self.SBRmat = SBR 
         
-        NS = [dictionary.doc2bow(doc) for doc in self.NSBRs]
+        NS = [dictionary.doc2bow(doc) for doc in NSBR]
         NS = self.makematrix(NS,len(dictionary))
         NSBR = NS[:,:W]
+        self.NSBRmat = NSBR
 
-        # 保存SBR/NSBR用于进一步过滤
-        self.SBR = SBR
-        self.NSBR = NSBR
-        
-        S = S.dot(numpy.ones((S.shape[1],1)))
-        S = numpy.ones((1,S.shape[0])).dot(S)
-        NS = NS.dot(numpy.ones((NS.shape[1],1)))
-        NS = numpy.ones((1,NS.shape[0])).dot(NS)
+        # 统计所有词语出现的频率和|S|和|NS|
+        S = S.sum()
+        NS = NS.sum()
 
-        # 合计SBR和NSBR的词频
-        SBR = numpy.ones((1,SBR.shape[0])).dot(SBR)
-        if support == 'sq':
+        # 合计SBR和NSBR的每个词语的词频,1行n列
+        # 论文中tf(Sw)与tf-idf的tf(t,br)不太一样,但论文没有指明怎么算,两处用#注释掉的代码用于处理这个问题
+        # 根据结果发现, 使用论文中的tf(t,br)导出的tf介于0.5-1.0,对一个词在SBR中的权重和在NSBR中的权重区分度不大
+        # 故此处直接统计词频的总和
+        # SBR = self.tf(SBR)
+        SBR = SBR.sum(axis= 0)
+        if 'clni' in support:
+            NSBR = self.CLNI() 
+        if 'sq' in support:
             SBR *= SBR
-        elif support == 'two':
+        elif  'two' in support:
             SBR *= 2
         SBR /= S
-        SBR[SBR>1]=1
+        SBR[SBR>1]=1 # 不能大于１
 
-        NSBR = numpy.ones((1,NSBR.shape[0])).dot(NSBR)
+        # NSBR = self.tf(NSBR)
+        NSBR = NSBR.sum(axis = 0)
         NSBR /= NS
         NSBR[NSBR>1]=1
 
@@ -214,22 +228,32 @@ class Filtering:
         M[M<0.01]=0.01
         print("key words score : ")
         print(M)
+        print("the average score:", M.sum())
         return M
 
+
     def ScoreBugReports(self,M):
-        NSBR = self.NSBR
+        NSBR = self.NSBRmat
         NSBR[NSBR>1]=1
 
-        Mstar = NSBR.dot(M.T)
-        Mquote = NSBR.dot(1-M.T)
-        # 对于个别br 不存在安全相关词语，则上面两个式子都为0，应该避免0/0,改为0/1
-        Mquote[Mquote==0]=1
+        Mstar = NSBR * M
+
+        Mstar[Mstar==0] = 1
+        Mstar = Mstar.prod(1)
+
+        # 对于个别br 不存在安全相关词语(特征全为0)，M*为1，改为0
+        Mstar[Mstar==1] = 0
+
+        Mquote = NSBR * (1-M)
+        Mquote[Mquote == 0] = 1
+        Mquote = Mquote.prod(1)
+        # 对于个别br 不存在安全相关词语(特征全为0)，则M'为1，保留1
 
         return Mstar/(Mstar+Mquote)
 
     def CLNI(self):
-        NSBR = self.NSBR
-        SBR = self.SBR
+        NSBR = self.NSBRmat
+        SBR = self.SBRmat
 
         del_count = 0
         e = 0
@@ -251,28 +275,27 @@ class Filtering:
             else :
                 e = del_count /(del_count +delect)
             del_count = del_count +delect
-            NSBR = numpy.delete(NSBR, index, axis=0)  
-            n = len(self.NSBRs)
-            self.NSBRs = [self.NSBRs[x] for x in range(n) if not x in index]
+            NSBR = np.delete(NSBR, index, axis=0)  
+        self.NSBRmat = NSBR
         print('CLNI delect : ', del_count)
-        return True
+        return NSBR
 
     def EuclideanDistances(self,A, B):
         AB = A.dot(B.T)
-        Asq =  (A**2).dot(numpy.ones((A.shape[1],1)))  # A行1列
-        Bsq =  (   (B**2).dot(numpy.ones((B.shape[1],1)))  ).T # 1行B列
+        Asq =  np.array([(A**2).sum(axis = 1)]).T # A行1列
+        Bsq =  (B**2).sum(axis =1) # 1行B列
         # 结果是欧氏距离的平方(未开方），已经足够比较距离了
         distance = -2 * AB +Asq +Bsq
         return  distance
 
     def makematrix(self, data,lenth):
         
-        matrix = numpy.zeros((len(data),lenth))
+        matrix = np.zeros((len(data),lenth))
         
         for row in range(len(data)):
             for col in data[row]: 
                 matrix[row,col[0]] = col[1]
-                
+               
         return matrix
 
 

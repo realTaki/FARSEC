@@ -1,9 +1,16 @@
 import pre
 
+# 初始化过滤器
 Filter = pre.Filtering()
 
-br,label = Filter.readcsv(dir = "Ambari.csv",summary_col=1,description_col =2,security_col=3)
+# 读取数据并预处理
+Filter.treatment(dir = "Ambari2.csv")
+# Filter.readDateFromFile(date = "date.csv")
 
-print( "find security related keywords succeed ? ",Filter.findSRW(br,label))
 
+# 找到安全相关关键词
+Filter.findSRW()
+print("find security related keywords succeed")
+
+# 过滤NSBR并训练
 Filter.farsec(support='farsecsq',train='knn')
