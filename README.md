@@ -1,9 +1,9 @@
 # Text Filtering and Ranking for Security Bug Report Prediction
 
-------
+This project replicates a study that uses text filtering and ranking to predict which bug reports describe security issues.
 
-该项目实现了一种用文本过滤和排序方法进行安全缺陷报告预测的方法。
+## Implementation status
 
----
+The filtering stage is implemented. In a test with 1,000 bug reports (BRs), about 50 were security bug reports (SBRs). After filtering, 220 non-security bug reports (NSBRs) remained.
 
-目前已经实现了筛选部分，测试中1000份BR中约50份SBR，剩下的NSBR通过筛选剩下220篇，筛选结果似乎比原文更为严格，个人认为是原论文没有考虑还原词根的因素，导致其所指出的安全相关关键词存在词意重复，个人预计自己的测试结果可能优于论文。
+The filter appeared to be more selective than the one reported in the original paper. One possible explanation is that the original method did not use stemming, so its list of security-related keywords may have included multiple forms of the same word. Whether this stricter filtering improves prediction performance remains to be evaluated.
